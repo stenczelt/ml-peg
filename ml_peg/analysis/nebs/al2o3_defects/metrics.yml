@@ -1,0 +1,13 @@
+metrics:
+  Force MAE (all dopants):
+    good: 0.0
+    bad: 0.5
+    unit: eV/Å
+    tooltip: "Mean Absolute Error of forces along dopant NEB paths"
+    level_of_theory: PBE
+  Barrier (Y):
+    good: 0.0
+    bad: 10.0
+    unit: eV
+    tooltip: "Y dopant migration barrier via model-driven NEB"
+    level_of_theory: null
