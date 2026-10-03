@@ -10,7 +10,7 @@ from warnings import warn
 
 from ase.atoms import Atoms
 from ase.io import read, write
-from janus_core.calculations.geom_opt import GeomOpt
+from ase.neighborlist import NeighborList, natural_cutoffs
 from janus_core.calculations.neb import NEB
 import numpy as np
 import pytest
@@ -177,129 +177,129 @@ def test_al2o3_defects(mlip: tuple[str, Any]) -> None:
         write(out_dir / "al2o3_defects.extxyz", results)
 
 
-@pytest.fixture(scope="module")
-def al2o3_unrelaxed_endpoints() -> tuple[Atoms, Atoms]:
+# Test 1 (stability): short model-driven NEBs over every nearest-neighbour hop of a
+# dopant. Edit these to widen the sweep; each hop is an independent test.
+STABILITY_DOPANTS = ("Y",)
+STABILITY_SITES = (0, 12)  # 0: Al site, 12: O site, as in the MACE-MP-0 paper
+DOPANT_CUTOFF = 2.0  # Å, neighbour-search radius for the dopant (paper value)
+RELAX_STEPS = 10
+NEB_STEPS = 10  # ponytail: enough to expose blow-ups, not to converge the band
+N_IMAGES = 5
+
+
+def _supercell() -> Atoms:
     """
-    Generate unrelaxed endpoints for Yttrium diffusion.
+    Build the 120-atom alpha-Al2O3 supercell.
+
+    Returns
+    -------
+    ase.atoms.Atoms
+        2x2x1 supercell of mp-1143, as in the MACE-MP-0 paper.
+    """
+    atoms = read(DATA_PATH / "al2o3_mp-1143.xyz") * (2, 2, 1)
+    atoms.info.update(charge=0, spin=1)
+    return atoms
+
+
+def _enumerate_hops() -> list[tuple[str, int, int]]:
+    """
+    Find all in-cell nearest-neighbour hops for each dopant and site.
+
+    Returns
+    -------
+    list[tuple[str, int, int]]
+        ``(dopant, site, neighbour)`` triples.
+    """
+    hops = []
+    for dopant in STABILITY_DOPANTS:
+        for site in STABILITY_SITES:
+            atoms = _supercell()
+            atoms[site].symbol = dopant
+            cutoffs = natural_cutoffs(atoms)
+            cutoffs[site] = DOPANT_CUTOFF
+            # bothways: the paper's one-way list missed neighbours below the site index
+            nl = NeighborList(cutoffs, self_interaction=False, bothways=True)
+            nl.update(atoms)
+            for neighbour, offset in zip(*nl.get_neighbors(site), strict=True):
+                if not offset.any():  # skip periodic images
+                    hops.append((dopant, site, int(neighbour)))
+    return hops
+
+
+HOPS = _enumerate_hops()
+
+
+def _hop_endpoints(dopant: str, site: int, neighbour: int) -> tuple[Atoms, Atoms]:
+    """
+    Build unrelaxed, index-aligned endpoints for a dopant hop.
+
+    Start: dopant on ``site`` with ``neighbour`` removed. End: dopant moved into the
+    vacated ``neighbour`` position.
+
+    Parameters
+    ----------
+    dopant
+        Chemical symbol of the dopant.
+    site
+        Index of the substituted site in the supercell.
+    neighbour
+        Index of the neighbouring atom to remove.
 
     Returns
     -------
     tuple[ase.atoms.Atoms, ase.atoms.Atoms]
-        The initial and final states.
+        Start and end structures.
     """
-    # alpha-Al2O3 from Materials Project (mp-1143), as in the MACE-MP-0 paper
-    supercell = read(DATA_PATH / "al2o3_mp-1143.xyz") * (2, 2, 1)
-    supercell[0].symbol = "Y"
-
-    init_state = supercell.copy()
-    del init_state[1]  # nearest-neighbour Al site, 3.25 Å from site 0
-
-    final_state = supercell.copy()
-    final_state.positions[0] = supercell.positions[1]
-    del final_state[1]
-
-    return init_state, final_state
-
-
-@pytest.fixture(scope="module")
-def al2o3_relaxed_endpoints(
-    al2o3_unrelaxed_endpoints: tuple[Atoms, Atoms],
-) -> dict[str, tuple[Atoms, Atoms]]:
-    """
-    Relax endpoints for all models.
-
-    Parameters
-    ----------
-    al2o3_unrelaxed_endpoints
-        Unrelaxed endpoints from fixture.
-
-    Returns
-    -------
-    dict[str, tuple[ase.atoms.Atoms, ase.atoms.Atoms]]
-        Relaxed endpoints per model.
-    """
-    relaxed_endpoints = {}
-    init_unrelaxed, final_unrelaxed = al2o3_unrelaxed_endpoints
-
-    for model_name, model in MODELS.items():
-        calc = model.get_calculator(precision="high")
-        init_state = init_unrelaxed.copy()
-        final_state = final_unrelaxed.copy()
-        init_state.calc = calc
-        final_state.calc = calc
-
-        # We limit steps to 50 for CI speed
-        try:
-            opt_init = GeomOpt(
-                struct=init_state,
-                write_results=True,
-                file_prefix=OUT_PATH / model_name / "al2o3_Y_start",
-                steps=50,
-                filter_class=None,  # fixed cell, NEB needs equal lattices
-            )
-            opt_init.run()
-            init_relaxed = opt_init.struct
-
-            opt_final = GeomOpt(
-                struct=final_state,
-                write_results=True,
-                file_prefix=OUT_PATH / model_name / "al2o3_Y_end",
-                steps=50,
-                filter_class=None,  # fixed cell, NEB needs equal lattices
-            )
-            opt_final.run()
-            final_relaxed = opt_final.struct
-
-            relaxed_endpoints[model_name] = (init_relaxed, final_relaxed)
-        except Exception as exc:
-            warn(f"Error relaxing endpoints for {model_name}: {exc}", stacklevel=2)
-            relaxed_endpoints[model_name] = (init_state, final_state)  # fallback
-
-    return relaxed_endpoints
+    atoms = _supercell()
+    atoms[site].symbol = dopant
+    start = atoms.copy()
+    del start[neighbour]
+    end = start.copy()
+    end.positions[site - (neighbour < site)] = atoms.positions[neighbour]
+    return start, end
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("model_name", MODELS)
-def test_al2o3_defects_barrier(
-    al2o3_relaxed_endpoints: dict[str, tuple[Atoms, Atoms]], model_name: str
+@pytest.mark.parametrize("hop", HOPS, ids=lambda h: "{}_{}_to_{}".format(*h))
+@pytest.mark.parametrize("mlip", MODELS.items())
+def test_al2o3_dopant_stability(
+    mlip: tuple[str, Any], hop: tuple[str, int, int]
 ) -> None:
     """
-    Run model-driven NEB to find the barrier for Y diffusion.
+    Run a short model-driven NEB for one dopant hop.
+
+    Writes ``<label>-neb-results.dat``; the barrier is NaN if the run fails.
 
     Parameters
     ----------
-    al2o3_relaxed_endpoints
-        Relaxed endpoints per model.
-    model_name
-        Name of model to use.
+    mlip
+        Tuple of ``(model_name, model)`` as provided by ``MODELS.items()``.
+    hop
+        ``(dopant, site, neighbour)`` triple.
     """
-    init_struct, final_struct = al2o3_relaxed_endpoints[model_name]
-
-    neb = NEB(
-        init_struct=init_struct,
-        final_struct=final_struct,
-        n_images=7,  # Fewer images for speed
-        interpolator="ase",  # index-aligned endpoints; pymatgen autosort fails on Y hop
-        minimize=True,
-        plot_band=True,
-        write_band=True,
-        file_prefix=OUT_PATH / model_name / "al2o3_Y_neb",
-        steps=50,  # Fewer steps for speed
-    )
+    model_name, model = mlip
+    label = "{}_{}_to_{}".format(*hop)
+    out_dir = OUT_PATH / model_name / "stability"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        neb.interpolate()
-        neb.interpolator = None
-        for image in neb.images:
-            image.info.setdefault("charge", 0)
-            image.info.setdefault("spin", 1)
+        start, end = _hop_endpoints(*hop)
+        start.calc = model.get_calculator(precision="high")
+        end.calc = start.calc
+        neb = NEB(
+            init_struct=start,
+            final_struct=end,
+            n_images=N_IMAGES,
+            interpolator="ase",  # index-aligned; pymatgen autosort fails on the hop
+            minimize=True,
+            minimize_kwargs={"filter_class": None, "steps": RELAX_STEPS},
+            write_band=True,
+            file_prefix=out_dir / label,
+            steps=NEB_STEPS,
+        )
         neb.run()
-    except Exception as e:
-        warn(f"Error running NEB for {model_name}: {e}", stacklevel=2)
-        # Write out nan results
-        out_dir = OUT_PATH / model_name
-        out_dir.mkdir(exist_ok=True, parents=True)
-        write(out_dir / "al2o3_Y_neb-neb-band.extxyz", [init_struct, final_struct])
-        with open(out_dir / "al2o3_Y_neb-neb-results.dat", "w", encoding="utf8") as out:
+    except Exception as exc:
+        warn(f"Error running NEB {label} for {model_name}: {exc}", stacklevel=2)
+        with open(out_dir / f"{label}-neb-results.dat", "w", encoding="utf8") as out:
             print("#Barrier [eV] | delta E [eV] | Max force [eV/Å] ", file=out)
             print(np.nan, np.nan, np.nan, file=out)

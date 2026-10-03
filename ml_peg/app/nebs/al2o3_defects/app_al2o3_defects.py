@@ -37,7 +37,7 @@ class Al2O3DefectsApp(BaseApp):
 
             try:
                 neb_plots[model] = read_plot(
-                    DATA_PATH / model / "figure_neb_Y.json",
+                    DATA_PATH / model / "figure_hop_barriers.json",
                     id=f"{BENCHMARK_NAME}-figure-neb-{model}",
                 )
             except FileNotFoundError:
@@ -50,7 +50,7 @@ class Al2O3DefectsApp(BaseApp):
             plot_id=f"{BENCHMARK_NAME}-figure-placeholder",
             plots={
                 "Force MAE (all dopants)": force_plots,
-                "Barrier (Y)": neb_plots,
+                "NEB failure rate": neb_plots,
             },
         )
 
