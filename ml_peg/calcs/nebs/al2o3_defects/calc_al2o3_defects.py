@@ -9,7 +9,6 @@ from typing import Any
 from warnings import warn
 
 from ase.atoms import Atoms
-from ase.build import bulk
 from ase.io import read, write
 from janus_core.calculations.geom_opt import GeomOpt
 from janus_core.calculations.neb import NEB
@@ -188,12 +187,12 @@ def al2o3_unrelaxed_endpoints() -> tuple[Atoms, Atoms]:
     tuple[ase.atoms.Atoms, ase.atoms.Atoms]
         The initial and final states.
     """
-    al2o3 = bulk("Al2O3", crystalstructure="corundum", a=4.76, c=12.99)
-    supercell = al2o3 * (2, 2, 1)
+    # alpha-Al2O3 from Materials Project (mp-1143), as in the MACE-MP-0 paper
+    supercell = read(DATA_PATH / "al2o3_mp-1143.xyz") * (2, 2, 1)
     supercell[0].symbol = "Y"
 
     init_state = supercell.copy()
-    del init_state[1]  # an adjacent Al atom
+    del init_state[1]  # nearest-neighbour Al site, 3.25 Å from site 0
 
     final_state = supercell.copy()
     final_state.positions[0] = supercell.positions[1]
@@ -204,7 +203,7 @@ def al2o3_unrelaxed_endpoints() -> tuple[Atoms, Atoms]:
 
 @pytest.fixture(scope="module")
 def al2o3_relaxed_endpoints(
-    al2o3_unrelaxed_endpoints: tuple[Atoms, Atoms]
+    al2o3_unrelaxed_endpoints: tuple[Atoms, Atoms],
 ) -> dict[str, tuple[Atoms, Atoms]]:
     """
     Relax endpoints for all models.
@@ -236,6 +235,7 @@ def al2o3_relaxed_endpoints(
                 write_results=True,
                 file_prefix=OUT_PATH / model_name / "al2o3_Y_start",
                 steps=50,
+                filter_class=None,  # fixed cell, NEB needs equal lattices
             )
             opt_init.run()
             init_relaxed = opt_init.struct
@@ -245,6 +245,7 @@ def al2o3_relaxed_endpoints(
                 write_results=True,
                 file_prefix=OUT_PATH / model_name / "al2o3_Y_end",
                 steps=50,
+                filter_class=None,  # fixed cell, NEB needs equal lattices
             )
             opt_final.run()
             final_relaxed = opt_final.struct
@@ -260,10 +261,10 @@ def al2o3_relaxed_endpoints(
 @pytest.mark.slow
 @pytest.mark.parametrize("model_name", MODELS)
 def test_al2o3_defects_barrier(
-    al2o3_relaxed_endpoints: dict[str, tuple[Atoms, Atoms]],
-    model_name: str
+    al2o3_relaxed_endpoints: dict[str, tuple[Atoms, Atoms]], model_name: str
 ) -> None:
-    """Run model-driven NEB to find the barrier for Y diffusion.
+    """
+    Run model-driven NEB to find the barrier for Y diffusion.
 
     Parameters
     ----------
@@ -278,7 +279,7 @@ def test_al2o3_defects_barrier(
         init_struct=init_struct,
         final_struct=final_struct,
         n_images=7,  # Fewer images for speed
-        interpolator="pymatgen",
+        interpolator="ase",  # index-aligned endpoints; pymatgen autosort fails on Y hop
         minimize=True,
         plot_band=True,
         write_band=True,

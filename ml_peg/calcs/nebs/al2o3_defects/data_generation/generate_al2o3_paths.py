@@ -9,8 +9,9 @@ and energies used in the frozen-image ML-PEG benchmark.
 
 from __future__ import annotations
 
-from ase.build import bulk
-from ase.io import write
+from pathlib import Path
+
+from ase.io import read, write
 from ase.mep import NEB
 from ase.neighborlist import NeighborList, natural_cutoffs
 from ase.optimize import LBFGS
@@ -35,9 +36,8 @@ def generate_reference_paths(calc, dopant: str = "Y"):
         The chemical symbol of the dopant to insert.
     """
     # 1. Structure preparation
-    # In the original paper, mp-1143 (alpha-Al2O3) was used.
-    # Here we approximate with ASE bulk as a demonstration.
-    al2o3 = bulk("Al2O3", crystalstructure="corundum", a=4.76, c=12.99)
+    # alpha-Al2O3 from Materials Project (mp-1143), as in the MACE-MP-0 paper
+    al2o3 = read(Path(__file__).parents[1] / "data" / "al2o3_mp-1143.xyz")
     # Supercell 2x2x1 -> 120 atoms
     supercell = al2o3 * (2, 2, 1)
 
@@ -87,7 +87,7 @@ def generate_reference_paths(calc, dopant: str = "Y"):
         opt_final.run(fmax=0.05)
 
         # Guard against bad endpoints
-        if init_state.get_distance(dopant_idx, 0) < 1.0:  # simplified check
+        if np.abs(init_state.positions - final_state.positions).max() < 1.0:
             continue
 
         # NEB
