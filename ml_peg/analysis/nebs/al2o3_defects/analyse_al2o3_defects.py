@@ -10,7 +10,7 @@ from ase.io import read, write
 import numpy as np
 import pytest
 
-from ml_peg.analysis.utils.decorators import build_table, plot_parity
+from ml_peg.analysis.utils.decorators import build_table, plot_parity, plot_scatter
 from ml_peg.analysis.utils.utils import load_metrics_config, mae, write_struct_info
 from ml_peg.app import APP_ROOT
 from ml_peg.calcs import CALCS_ROOT
@@ -36,6 +36,11 @@ class _Case:
     key: str
     label: str
 
+
+# A hop fails if its NEB crashed (NaN) or its hump above the higher endpoint exceeds
+# this sanity cap; measuring from the higher endpoint keeps uphill hops (barrier ~ dE,
+# e.g. Y moving into an O site) from counting as blow-ups.
+BARRIER_LIMIT = 5.0  # eV
 
 CASES: tuple[_Case, ...] = (_Case(key="all_dopants", label="all dopants"),)
 
@@ -181,7 +186,8 @@ def case_results() -> dict[tuple[str, str], _Results]:
 
 @pytest.fixture
 def metrics_dict(
-    case_results: dict[tuple[str, str], _Results], barrier_y: dict[str, float]
+    case_results: dict[tuple[str, str], _Results],
+    failure_rate: dict[str, float],
 ) -> dict[str, dict[str, float]]:
     """
     Build raw metric dict for the benchmark table.
@@ -190,8 +196,8 @@ def metrics_dict(
     ----------
     case_results
         Results indexed by ``(case_key, model_name)``.
-    barrier_y
-        Barrier heights for Yttrium.
+    failure_rate
+        Fraction of failed dopant-hop NEBs per model.
 
     Returns
     -------
@@ -200,7 +206,7 @@ def metrics_dict(
     """
     metrics: dict[str, dict[str, float]] = {}
 
-    metrics["Barrier (Y)"] = barrier_y
+    metrics["NEB failure rate"] = failure_rate
 
     for case in CASES:
         force_key = f"Force MAE ({case.label})"
@@ -239,93 +245,96 @@ def metrics(metrics_dict: dict[str, dict[str, float]]) -> dict[str, dict]:
 
 def test_al2o3_defects(metrics: dict[str, dict]) -> None:
     """
-    Run analysis for Al2O3 defects DFT singlepoints.
+    Run analysis for Al2O3 defects DFT singlepoints and dopant-hop NEBs.
 
     Parameters
     ----------
     metrics
         Benchmark metrics table.
     """
-    # Write a mock structure info so the app can visualize something
     write_struct_info(
-        data_path=list(CALC_PATH.glob("mock/*/al2o3_defects.extxyz")),
+        data_path=[
+            *CALC_PATH.glob("mock/*/al2o3_defects.extxyz"),
+            *CALC_PATH.glob("mock/stability/*-neb-band.extxyz"),
+        ],
         out_path=OUT_PATH,
-        index=0,
-    )
-
-    write_struct_info(
-        data_path=list(CALC_PATH.glob("mock/*/al2o3_Y_neb-neb-band.extxyz")),
-        out_path=OUT_PATH,
-        index=0,
     )
 
 
-def plot_al2o3_neb(model_name: str) -> None:
+def _hop_barriers(model_name: str) -> dict[str, float]:
     """
-    Plot the Yttrium NEB path and save structure files.
+    Read the NEB hump above the higher endpoint for every dopant hop of a model.
 
     Parameters
     ----------
     model_name
         Name of the model.
-    """
-    from ml_peg.analysis.utils.decorators import plot_scatter
-
-    @plot_scatter(
-        filename=OUT_PATH / model_name / "figure_neb_Y.json",
-        title="NEB path (Yttrium)",
-        x_label="Image",
-        y_label="Energy / eV",
-        show_line=True,
-    )
-    def plot_neb() -> dict[str, tuple[list[float], list[float]]]:
-        """
-        Plot a single NEB band for Yttrium.
-
-        Returns
-        -------
-        dict[str, tuple[list[float], list[float]]]
-            Mapping of model name to x/y arrays.
-        """
-        results = {}
-        structs = read(
-            CALC_PATH / model_name / "al2o3_Y_neb-neb-band.extxyz",
-            index=":",
-        )
-        results[model_name] = [
-            list(range(len(structs))),
-            [struct.get_potential_energy() for struct in structs],
-        ]
-        structs_dir = OUT_PATH / model_name
-        structs_dir.mkdir(parents=True, exist_ok=True)
-        write(structs_dir / "al2o3_Y-neb-band.extxyz", structs)
-        return results
-
-    plot_neb()
-
-
-@pytest.fixture
-def barrier_y() -> dict[str, float]:
-    """
-    Get Yttrium diffusion barrier.
 
     Returns
     -------
     dict[str, float]
-        Barrier heights for all models.
+        ``barrier - max(dE, 0)`` (eV, NaN if the NEB failed) indexed by hop label.
     """
-    OUT_PATH.mkdir(parents=True, exist_ok=True)
-    results = {}
+    barriers = {}
+    for path in sorted((CALC_PATH / model_name / "stability").glob("*.dat")):
+        barrier, delta_e, _ = np.loadtxt(path)
+        barriers[path.name.removesuffix("-neb-results.dat")] = float(
+            barrier - max(delta_e, 0.0)
+        )
+    return barriers
+
+
+def _plot_hop_barriers(model_name: str, barriers: dict[str, float]) -> None:
+    """
+    Plot the barrier of every dopant hop for a model.
+
+    Parameters
+    ----------
+    model_name
+        Name of the model.
+    barriers
+        Barrier indexed by hop label.
+    """
+
+    @plot_scatter(
+        filename=OUT_PATH / model_name / "figure_hop_barriers.json",
+        title=f"Dopant-hop NEB barriers ({model_name})",
+        x_label="Hop",
+        y_label="Barrier above higher endpoint / eV",
+        hoverdata={"Hop": list(barriers)},
+        horizontal_lines=[{"y": BARRIER_LIMIT, "name": "failure cap"}],
+    )
+    def plot_barriers() -> dict[str, list[list]]:
+        """
+        Plot hop barriers.
+
+        Returns
+        -------
+        dict[str, list[list]]
+            Mapping of model name to x/y arrays.
+        """
+        return {model_name: [list(range(len(barriers))), list(barriers.values())]}
+
+    plot_barriers()
+
+
+@pytest.fixture
+def failure_rate() -> dict[str, float]:
+    """
+    Get the fraction of dopant-hop NEBs that crashed or blew up per model.
+
+    Returns
+    -------
+    dict[str, float]
+        Failure fraction in [0, 1], or NaN if no hops were run.
+    """
+    rates = {}
     for model_name in MODELS:
-        try:
-            plot_al2o3_neb(model_name)
-            with open(
-                CALC_PATH / model_name / "al2o3_Y_neb-neb-results.dat",
-                encoding="utf8",
-            ) as f:
-                data = f.readlines()
-                pred_barrier, _, _ = tuple(float(x) for x in data[1].split())
-            results[model_name] = pred_barrier
-        except (FileNotFoundError, KeyError, IndexError):
-            results[model_name] = float("nan")
-    return results
+        barriers = _hop_barriers(model_name)
+        if not barriers:
+            rates[model_name] = float("nan")
+            continue
+        _plot_hop_barriers(model_name, barriers)
+        failed = [not b <= BARRIER_LIMIT for b in barriers.values()]  # NaN fails
+        rates[model_name] = float(np.mean(failed))
+    return rates

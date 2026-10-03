@@ -5,9 +5,9 @@ metrics:
     unit: eV/Å
     tooltip: "Mean Absolute Error of forces along dopant NEB paths"
     level_of_theory: PBE
-  Barrier (Y):
+  NEB failure rate:
     good: 0.0
-    bad: 10.0
-    unit: eV
-    tooltip: "Y dopant migration barrier via model-driven NEB"
+    bad: 1.0
+    unit: null
+    tooltip: "Fraction of short model-driven dopant-hop NEBs that crash or rise over 5 eV above the higher endpoint"
     level_of_theory: null
