@@ -141,16 +141,16 @@ def _write_plots(case_key: str, case_label: str, model: str, results: _Results) 
         x_label="Predicted force component / (eV/Å)",
         y_label="Reference force component / (eV/Å)",
     )
-    def plot_forces() -> dict[str, tuple[list[float], list[float]]]:
+    def plot_forces() -> dict[str, list[float]]:
         """
         Plot force parity for a single model and case.
 
         Returns
         -------
-        dict[str, tuple[list[float], list[float]]]
-            Mapping of model name to pred/ref arrays.
+        dict[str, list[float]]
+            Reference and predicted force components.
         """
-        return {model: [results.pred_forces_flat, results.ref_forces_flat]}
+        return {"ref": results.ref_forces_flat, model: results.pred_forces_flat}
 
     plot_forces()
 
